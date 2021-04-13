@@ -1,0 +1,17 @@
+
+# Use root/example as user/password credentials
+version: '3.1'
+
+services:
+
+  db:
+    image: postgres
+    restart: always
+    ports: 
+      - 15433:5432
+    volumes:
+      - ./.postgres/data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: bank_statement
