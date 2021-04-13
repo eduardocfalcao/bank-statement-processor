@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/aclindsa/ofxgo"
@@ -52,27 +54,46 @@ func main() {
 		log.Fatal(err)
 	}
 
-	ctx := context.Background()
+	ctx, cancelFunc := context.WithTimeout(context.Background(), time.Duration(3*time.Second))
+
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	stmt, ok := resp.Bank[0].(*ofxgo.StatementResponse)
-
 	if !ok {
-		log.Fatal("Not possible to cast 'resp.Bank[0]' in line 39 to  '*ofxgo.StatementResponse'")
+		log.Fatal("Not possible to cast 'resp.Bank[0]' to  '*ofxgo.StatementResponse'")
 	}
 
-	<-Flush(ctx, db, Accumulator(ctx, 50, Transform(ctx, InitProcessing(ctx, stmt.BankTranList.Transactions))))
+	log.Println("Initiating the process pipeline.")
+	// pipeline
+	doneCh := Flush(ctx, db, Accumulator(ctx, 50, Transform(ctx, InitProcessing(ctx, stmt.BankTranList.Transactions))))
 
-	log.Println("Processing finished!")
+	select {
+	case <-c:
+		log.Printf("Cancelation requested...")
+		cancelFunc()
+	case <-doneCh:
+		if ctx.Err() != nil {
+			log.Fatal(ctx.Err())
+			return
+		}
+		log.Println("Processing finished!")
+	}
 }
 
 func InitProcessing(ctx context.Context, transactions []ofxgo.Transaction) <-chan ofxgo.Transaction {
 	transactionsStream := make(chan ofxgo.Transaction)
 	go func() {
 		defer close(transactionsStream)
+
+		// the line below simulates a timeout
+		// <-time.After(time.Duration(4 * time.Second))
+
 		for _, transaction := range transactions {
 			select {
 			case transactionsStream <- transaction:
 			case <-ctx.Done():
+				log.Println("Initial processing canceled.")
 				return
 			}
 		}
@@ -96,6 +117,7 @@ func Transform(ctx context.Context, transactionsStream <-chan ofxgo.Transaction)
 			}
 			select {
 			case <-ctx.Done():
+				log.Println("Transformation process canceled.")
 				return
 			case stream <- t:
 			}
@@ -115,6 +137,7 @@ func Accumulator(ctx context.Context, batchSize int, transactionsStream <-chan T
 			if len(sl) == batchSize {
 				select {
 				case <-ctx.Done():
+					log.Println("Accumulating process canceled.")
 					return
 				case stream <- sl:
 					sl = make([]Transaction, 0, 50)
@@ -122,6 +145,7 @@ func Accumulator(ctx context.Context, batchSize int, transactionsStream <-chan T
 			}
 			select {
 			case <-ctx.Done():
+				log.Println("Accumulating process canceled.")
 				return
 			default:
 			}
@@ -129,6 +153,7 @@ func Accumulator(ctx context.Context, batchSize int, transactionsStream <-chan T
 		if len(sl) > 0 {
 			select {
 			case <-ctx.Done():
+				log.Println("Accumulating process canceled.")
 				return
 			case stream <- sl:
 			}
@@ -144,6 +169,7 @@ func Flush(ctx context.Context, db *sql.DB, transactionsStream <-chan []Transact
 		for transactions := range transactionsStream {
 			select {
 			case <-ctx.Done():
+				log.Println("Flush process canceled")
 				return
 			default:
 				err := Store(ctx, db, transactions)
